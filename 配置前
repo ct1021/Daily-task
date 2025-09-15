@@ -1,0 +1,270 @@
+1) 准备：确认 Docker 在运行（推荐）
+
+我们用 Docker 来跑 PostgreSQL 和 LocalStack（本地 S3 模拟），方便且干净。
+
+如果你还没安装 Docker Desktop，请先安装并登录，然后确保 Docker Desktop 已启动。
+
+检查：
+
+docker --version
+docker compose version
+
+2) （推荐）把 Postgres + LocalStack 用 docker-compose 一键启动
+
+在项目根（例如 E:\Microsoft VS Code\programs\aiXiv\aixiv-core 或更高一级）创建 docker-compose.yml，内容如下（保存为 docker-compose.yml）：
+
+version: "3.8"
+services:
+  db:
+    image: postgres:15
+    container_name: aixiv-db
+    environment:
+      POSTGRES_USER: aixiv
+      POSTGRES_PASSWORD: aixiv
+      POSTGRES_DB: aixiv
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  localstack:
+    image: localstack/localstack:1.4
+    container_name: localstack
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=us-east-1
+    ports:
+      - "4566:4566"
+      - "4571:4571"
+    volumes:
+      - localstack_data:/tmp/localstack
+
+volumes:
+  pgdata:
+  localstack_data:
+
+
+备注：LocalStack 在 localhost:4566 提供 S3 兼容接口；Postgres 在 localhost:5432。
+
+启动：
+
+docker compose up -d
+
+
+检查容器状态：
+
+docker ps
+
+3) 配置 .env
+
+在 aixiv-core 目录复制 .env.example 为 .env（或手动创建 .env），并把下面示例内容写入 .env （把 SECRET_KEY 换成你自己的随机字符串）：
+
+# Database
+DATABASE_URL=postgresql://aixiv:aixiv@localhost:5432/aixiv
+
+# AWS / S3 (使用 LocalStack 测试)
+AWS_ACCESS_KEY_ID=test
+AWS_SECRET_ACCESS_KEY=test
+AWS_REGION=us-east-1
+AWS_S3_BUCKET=aixiv-papers
+AWS_S3_ENDPOINT_URL=http://localhost:4566
+
+# App
+SECRET_KEY=your_secret_key_here
+DEBUG=True
+ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+
+
+解释：
+
+DATABASE_URL 指向刚才 Docker 的 Postgres（用户名/密码/db 与 docker-compose 保持一致）。
+
+AWS_S3_ENDPOINT_URL 是我们为 LocalStack 指定的 S3 endpoint（如果你改用真实 AWS，则删除此变量并填真实密钥/区域/桶名）。
+
+4) 在 LocalStack 中创建 S3 Bucket（用 Python 脚本或 AWS CLI）
+
+方法 A（最简单）：在后端虚拟环境里建一个小脚本 create_bucket.py（在 aixiv-core 目录），内容：
+
+# create_bucket.py
+import os
+import boto3
+
+endpoint = os.getenv("AWS_S3_ENDPOINT_URL", "http://localhost:4566")
+aws_key = os.getenv("AWS_ACCESS_KEY_ID", "test")
+aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY", "test")
+region = os.getenv("AWS_REGION", "us-east-1")
+bucket = os.getenv("AWS_S3_BUCKET", "aixiv-papers")
+
+s3 = boto3.client("s3",
+                  endpoint_url=endpoint,
+                  aws_access_key_id=aws_key,
+                  aws_secret_access_key=aws_secret,
+                  region_name=region)
+
+# Create bucket (LocalStack may ignore CreateBucketConfiguration in some regions)
+try:
+    s3.create_bucket(Bucket=bucket)
+    print("Bucket created:", bucket)
+except Exception as e:
+    print("Create bucket error (may already exist):", e)
+
+
+运行：
+
+# 在 venv 已激活的情况下
+python create_bucket.py
+
+
+方法 B（若安装了 awscli）：
+
+aws --endpoint-url=http://localhost:4566 s3 mb s3://aixiv-papers
+
+5) （可选）在 s3_service.py 中支持 AWS_S3_ENDPOINT_URL
+
+仓库里通常有 app/services/s3_service.py。为了让后端在使用 LocalStack 时正常工作，确认或修改 s3_service.py 中创建 boto3 client 的地方，按下面示例来处理 AWS_S3_ENDPOINT_URL（将此片段替换或合并到现有文件中）：
+
+# app/services/s3_service.py (示例)
+import os
+import boto3
+
+AWS_REGION = os.getenv("AWS_REGION")
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL")  # 例如 http://localhost:4566
+AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+
+s3_client_params = {
+    "region_name": AWS_REGION,
+    "aws_access_key_id": AWS_ACCESS_KEY_ID,
+    "aws_secret_access_key": AWS_SECRET_ACCESS_KEY,
+}
+if AWS_S3_ENDPOINT_URL:
+    s3_client_params["endpoint_url"] = AWS_S3_ENDPOINT_URL
+
+s3 = boto3.client("s3", **s3_client_params)
+
+def generate_presigned_put_url(key, content_type="application/pdf", expires_in=3600):
+    return s3.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": AWS_S3_BUCKET, "Key": key, "ContentType": content_type},
+        ExpiresIn=expires_in,
+    )
+
+
+修改完记得保存并在下一步重启后端进程。
+
+6) 确认数据库可用 & 运行 Alembic 迁移
+
+Postgres 容器启动后，确认数据库在线：
+
+# 进入容器并用 psql 检查（可选）
+docker exec -it aixiv-db psql -U aixiv -d aixiv -c "\l"
+
+
+如果一切正常，运行 Alembic 迁移来创建表结构（在 aixiv-core 目录，venv 激活）：
+
+# 如果 alembic 在 PATH
+alembic upgrade head
+
+# 或者使用 python -m（更稳）
+python -m alembic upgrade head
+
+
+提示：如果 alembic 找不到 DATABASE_URL，可以临时在同一终端设置环境变量：
+
+set DATABASE_URL=postgresql://aixiv:aixiv@localhost:5432/aixiv
+python -m alembic upgrade head
+
+
+或确保 .env 被项目的配置/alembic/env.py 加载（很多项目在 env.py 中会调用 load_dotenv()）。
+
+7) 启动后端（FastAPI）
+
+确保你仍在后端虚拟环境并且 .env 已配置好，执行：
+
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+
+打开浏览器检查 Swagger：
+
+http://127.0.0.1:8000/docs
+
+8) 启动前端（aiXiv）
+
+在另一个终端中进入 aiXiv 前端目录：
+
+cd ..\aiXiv
+npm install
+npm start
+
+
+打开：
+
+http://localhost:3000
+
+
+确保前端请求的后端地址与 .env 中 ALLOWED_ORIGINS 对应（已在 .env 中写入了 http://localhost:3000）。
+
+9) 测试文件上传与提交流程（示例）
+
+向后端请求预签名上传 URL（用 curl 或 REST Client）：
+
+curl -X POST "http://localhost:8000/api/get-upload-url" -H "Content-Type: application/json" -d "{\"filename\":\"test.pdf\"}"
+
+
+返回应包含 upload_url、file_key / s3_url。
+
+使用返回的 upload_url 把文件 PUT 到 S3：
+
+curl -X PUT -T ./test.pdf "<上传链接返回的upload_url>" -H "Content-Type: application/pdf"
+
+
+然后把包含 s3_url 的元数据提交到 /api/submit：
+
+curl -X POST "http://localhost:8000/api/submit" -H "Content-Type: application/json" -d '{
+  "title":"测试论文",
+  "agent_authors":["Alice","Bob"],
+  "corresponding_author":"Alice",
+  "category":["AI"],
+  "keywords":["snn"],
+  "license":"CC-BY",
+  "abstract":"摘要",
+  "s3_url":"<s3_url 返回值>",
+  "uploaded_by":"user1"
+}'
+
+10) 常见故障排查（针对这一步）
+
+Docker 容器没启动：docker ps 看不到 aixiv-db 或 localstack → docker compose up -d 再试。
+
+端口被占用：Postgres 默认 5432；如果冲突，修改 docker-compose 的 ports 映射或本地服务停止。
+
+Alembic 无法读取 DATABASE_URL：确保 .env 正确，或在终端 set DATABASE_URL=... 后运行迁移。
+
+S3 上传 403 / 连接错误：确认 LocalStack 在 4566 上运行并且你用的 AWS_S3_ENDPOINT_URL 是 http://localhost:4566，且在 s3_service.py 中把 endpoint_url 传入 boto3.client。
+
+如果 boto3 连接报证书/SSL 错误：LocalStack 用 HTTP（非 HTTPS），确保没有强制 https/blocker。
+
+11) 我给你的文件/代码片段（可直接复制）
+
+docker-compose.yml（如上）
+
+.env 示例（如上）
+
+create_bucket.py（如上）
+
+s3_service.py 的小修改片段（如上）
+
+Alembic 执行命令：python -m alembic upgrade head
+
+启动后端：uvicorn app.main:app --reload --port 8000
+
+启动前端：cd aiXiv && npm start
+
+如果你现在愿意，我可以立刻为你做两件事（你选择其一或全部）：
+
+把上面的 docker-compose.yml、create_bucket.py、.env 示例和 s3_service.py 改动，全部整成可以直接粘贴的文件内容（我会把文件名和内容都给出），方便你直接保存并运行。
+
+给你一份 powershell 的“一键启动脚本”（先启动 docker-compose、再创建 bucket、再启动后端），你双击就能跑（但你需要确认 Docker 已登录运行）。
+
+你想现在把这些文件内容一次性拿到并按序执行吗？我会把可以直接复制的完整文本发给你（包含注释）。
