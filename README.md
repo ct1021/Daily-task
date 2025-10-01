@@ -14,18 +14,27 @@
 ### 启动开发服务
     npm start
 ## 提交数据库相关修改
-### 克隆仓库（使用 SSH 链接克隆官方仓库（推荐 SSH，避免 push 权限问题））
-     git clone git@github.com:aixiv-org/aixiv-backend.git
-     cd aixiv-backend
-### 创建并切换到开发分支，避免在 main 上直接修改，创建新分支（如 dev_tt）
-     git checkout -b dev_tt
-### 本地修改 & 提交
-     git add .
-     git commit -m "feat: update DB scripts, config, add db tests"
-### 推送分支到远程 把本地 dev_tt 分支推送到远程仓库，成功后终端会输出：：
-     git push -u origin dev_tt
+### 确定本地仓库存在（确保里面有 .git 文件夹，说明这是一个 Git 仓库。）
+     cd E:\Microsoft VS Code\programs\aiXiv\backend\aixiv-backend
+### 检查/设置远程仓库地址
+     git remote -v
+### 如果远程地址不是 git@github.com:aixiv-org/aixiv-backend.git
+     git remote set-url origin git@github.com:aixiv-org/aixiv-backend.git
+### 测试 SSH 是否连通(Hi ct1021! You've successfully authenticated, but GitHub does not provide shell access.)
+     ssh -T git@github.com
+### 拉取远程最新分支
+     git fetch origin 
+     git push -u origin dev_tt# 或者你要基于的分支
      remote: Create a pull request for 'dev_tt' on GitHub by visiting:
      remote:   https://github.com/aixiv-org/aixiv-backend/pull/new/dev_tt
+### 提交本地修改
+     git add .
+     git commit -m "描述本次修改"
+### 推送到远程仓库
+     git push -u origin dev_tt
+     git push
+### 确认推送成功
+     git branch -vv
 ## 在 GitHub 上发起 Pull Request
      1. 打开提示的链接
      2. 填写 标题 和 描述
